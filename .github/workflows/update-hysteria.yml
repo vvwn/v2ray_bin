@@ -133,21 +133,33 @@ jobs:
           upx-ucl --lzma --ultra-brute "${{ env.ASSET_NAME }}" || echo "UPX failed; keeping original."
           ls -lh "${{ env.ASSET_NAME }}"
 
+	  
+		  
       - name: Place versioned binary & update latest.txt
         if: steps.guard.outputs.skip == 'false'
         run: |
+          set -euo pipefail
           ver="${{ steps.remote.outputs.remote_num }}"     # e.g. 2.6.5
           mkdir -p "${DEST_DIR}/v${ver}"
-          cp -f "${ASSET_NAME}" "${DEST_DIR}/v${ver}/${ASSET_NAME}"
-          echo "v${ver}" > "${DEST_DIR}/latest.txt"         # store version like v2.6.5
+
+          # 固定输出文件名：hysteria
+          cp -f "${ASSET_NAME}" "${DEST_DIR}/v${ver}/hysteria"
+          chmod +x "${DEST_DIR}/v${ver}/hysteria"
+
+          # 生成 md5sum.txt（格式：<md5><two spaces><filename>）
+          ( cd "${DEST_DIR}/v${ver}" && md5sum hysteria > md5sum.txt )
+
+          # latest.txt 依旧保存 v2.6.5 这种形式
+          echo "v${ver}" > "${DEST_DIR}/latest.txt"
 
       - name: Commit and push (message = v<version>)
         if: steps.guard.outputs.skip == 'false'
         run: |
-          set -e
+          set -euo pipefail
           ver="${{ steps.remote.outputs.remote_num }}"
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "${DEST_DIR}/v${ver}/${ASSET_NAME}" "${DEST_DIR}/latest.txt"
+
+          git add "${DEST_DIR}/v${ver}/hysteria" "${DEST_DIR}/v${ver}/md5sum.txt" "${DEST_DIR}/latest.txt"
           git commit -m "hysteria v${ver}" || echo "No changes to commit."
-          git push
+          git push		  
