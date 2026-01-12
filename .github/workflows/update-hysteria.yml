@@ -132,9 +132,7 @@ jobs:
         run: |
           upx-ucl --lzma --ultra-brute "${{ env.ASSET_NAME }}" || echo "UPX failed; keeping original."
           ls -lh "${{ env.ASSET_NAME }}"
-
-	  
-		  
+ 		  
       - name: Place versioned binary & update latest.txt
         if: steps.guard.outputs.skip == 'false'
         run: |
