@@ -132,7 +132,7 @@ jobs:
         run: |
           upx-ucl --lzma --ultra-brute "${{ env.ASSET_NAME }}" || echo "UPX failed; keeping original."
           ls -lh "${{ env.ASSET_NAME }}"
- 		  
+
       - name: Place versioned binary & update latest.txt
         if: steps.guard.outputs.skip == 'false'
         run: |
@@ -160,4 +160,4 @@ jobs:
 
           git add "${DEST_DIR}/v${ver}/hysteria" "${DEST_DIR}/v${ver}/md5sum.txt" "${DEST_DIR}/latest.txt"
           git commit -m "hysteria v${ver}" || echo "No changes to commit."
-          git push		  
+          git push
