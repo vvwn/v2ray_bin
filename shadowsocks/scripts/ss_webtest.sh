@@ -93,7 +93,117 @@ get_tgfingerprint(){
 
 create_v2ray_json(){
 
-rm -f /tmp/tmp_v2ray.json
+	rm -f /tmp/tmp_v2ray.json
+	rm -f /tmp/tmp_user.json
+	rm -f /tmp/tmp_v2ray.final.json
+
+	# ============================
+	# 新增：优先处理 v2ray_use_json=1 的节点
+	# ============================
+	local use_json=$(eval echo \$ssconf_basic_v2ray_use_json_$nu)
+	if [ "$use_json" = "1" ]; then
+		echo_date "webtest: 使用自定义 v2ray json 节点..."
+
+		# 解码用户 json（系统里应该已有 base64_decode）
+		local RAW_JSON=$(eval echo \$ssconf_basic_v2ray_json_$nu | base64_decode)
+		echo "$RAW_JSON" > /tmp/tmp_user.json
+
+		# 1) 统一 outbounds 为数组（兼容 outbound / outbounds）
+		OUTBOUNDS_ARR=$(jq -c '
+			if (.outbounds? // null) != null then
+				.outbounds
+			elif (.outbound? // null) != null then
+				[ .outbound ]
+			else
+				[]
+			end
+		' /tmp/tmp_user.json)
+
+		# 2) 判断是否是 xagg 聚合输入（tag 以 xagg_ 开头）
+		IS_XAGG=$(echo "$OUTBOUNDS_ARR" | jq -r '
+			any(.[]; ((.tag // "") | startswith("xagg_")))
+		')
+
+		# webtest 的基础模板：只保留原来的 socks inbound + log（最小改动）
+		cat >"/tmp/tmp_v2ray.json" <<-EOF
+			{
+			  "log": {
+			    "access": "/dev/null",
+			    "error": "/tmp/v2ray_webtest_log.log",
+			    "loglevel": "error"
+			  },
+			  "inbounds": [
+			    {
+			      "port": 23458,
+			      "listen": "0.0.0.0",
+			      "protocol": "socks",
+			      "settings": {
+			        "auth": "noauth",
+			        "udp": false,
+			        "ip": "127.0.0.1",
+			        "clients": null
+			      },
+			      "streamSettings": null
+			    }
+			  ]
+			}
+		EOF
+
+		if [ "$IS_XAGG" = "true" ]; then
+			echo_date "webtest: 检测到 xagg 聚合节点，补全 routing / observatory..."
+
+			# 3) 提取 tag 列表
+			TAGS=$(echo "$OUTBOUNDS_ARR" | jq -c '[ .[] | .tag ]')
+
+			# webtest 暂时固定策略（主页面才做 UI 动态）
+			XAGG_STRATEGY="leastPing"
+
+			# 4) 生成 routing + observatory
+			ROBS=$(jq -nc --argjson tags "$TAGS" '
+			{
+			  "routing": {
+			    "domainStrategy": "AsIs",
+			    "balancers": [
+			      {
+			        "tag": "balancer-main",
+			        "selector": $tags,
+			        "strategy": { "type": "'"$XAGG_STRATEGY"'" }
+			      }
+			    ],
+			    "rules": [
+			      {
+			        "type": "field",
+			        "inboundTag": [],
+			        "balancerTag": "balancer-main"
+			      }
+			    ]
+			  },
+			  "observatory": {
+			    "subjectSelector": $tags,
+			    "probeURL": "https://www.gstatic.com/generate_204",
+			    "probeInterval": "30s"
+			  }
+			}
+			')
+
+			# 5) 合并写入最终配置
+			jq \
+				--argjson outbounds "$OUTBOUNDS_ARR" \
+				--argjson robs "$ROBS" \
+				'. + {outbounds: $outbounds} + $robs' \
+				/tmp/tmp_v2ray.json > /tmp/tmp_v2ray.final.json
+		else
+			# 普通自定义 JSON（不启用聚合）
+			jq \
+				--argjson outbounds "$OUTBOUNDS_ARR" \
+				'. + {outbounds: $outbounds}' \
+				/tmp/tmp_v2ray.json > /tmp/tmp_v2ray.final.json
+		fi
+
+		mv /tmp/tmp_v2ray.final.json /tmp/tmp_v2ray.json
+		return 0
+	fi
+
 
 		local kcp="null"
 		local tcp="null"
@@ -101,14 +211,12 @@ rm -f /tmp/tmp_v2ray.json
 		local h2="null"
 		local grpc="null"
 		local tls="null"
-		local xtls="null"
 		local reality="null"
 		local vless_flow=""
 
 		# tcp和kcp下tlsSettings为null，ws和h2下tlsSettings
-
 		[ "$(eval echo \$ssconf_basic_v2ray_network_security_$nu)" == "none" ] && local ssconf_basic_v2ray_network_security=""
-		
+
 		if [ "$(eval echo \$ssconf_basic_v2ray_network_$nu)" == "ws" -o "$(eval echo \$ssconf_basic_v2ray_network_$nu)" == "h2" ] && [ -z "$(eval echo \$ssconf_basic_v2ray_network_tlshost_$nu)" ] && [ -n "$(eval echo \$ssconf_basic_v2ray_network_host_$nu)" ]; then
 		 	local ssconf_basic_v2ray_network_tlshost_$nu="$(eval echo \$ssconf_basic_v2ray_network_host_$nu)"
 		fi
@@ -122,32 +230,24 @@ rm -f /tmp/tmp_v2ray.json
 					\"fingerprint\": $(get_fingerprint $local_fingerprint),
 					\"serverName\": \"$(eval echo \$ssconf_basic_v2ray_network_tlshost_$nu)\"
 					}"
-					[ "$(eval echo \$ssconf_basic_v2ray_network_flow_$nu)" != "none" -a "$(eval echo \$ssconf_basic_v2ray_network_flow_$nu)" != "" ] && local vless_flow="\"flow\": \"$(eval echo \$ssconf_basic_v2ray_network_flow_$nu)\","	|| 	local vless_flow=""		
-			;;
-		xtls)
-			local xtls="{
-					\"allowInsecure\":  $(get_function_switch $(eval echo \$ssconf_basic_allowinsecure_$nu)),
-					\"serverName\": \"$(eval echo \$ssconf_basic_v2ray_network_tlshost_$nu)\"
-					}"
-			local vless_flow="\"flow\": \"$(eval echo \$ssconf_basic_v2ray_network_flow_$nu)\","
+					[ "$(eval echo \$ssconf_basic_v2ray_network_flow_$nu)" != "none" -a "$(eval echo \$ssconf_basic_v2ray_network_flow_$nu)" != "" ] && local vless_flow="\"flow\": \"$(eval echo \$ssconf_basic_v2ray_network_flow_$nu)\"," || local vless_flow=""
 			;;
 		reality)
 			local reality="{
 					\"serverName\": \"$(eval echo \$ssconf_basic_v2ray_network_tlshost_$nu)\",
 					\"fingerprint\": $(get_fingerprint $local_fingerprint),
-					\"publicKey\": \"$(eval echo \$ssconf_basic_xray_publicKey_$nu)\", 
-					\"shortId\": \"$(eval echo \$ssconf_basic_xray_shortId_$nu)\", 
+					\"publicKey\": \"$(eval echo \$ssconf_basic_xray_publicKey_$nu)\",
+					\"shortId\": \"$(eval echo \$ssconf_basic_xray_shortId_$nu)\",
 					\"spiderX\": \"\"
 					}"
 			local vless_flow="\"flow\": \"$(eval echo \$ssconf_basic_v2ray_network_flow_$nu)\","
-			;;	
+			;;
 		*)
 			local tls="null"
-			local xtls="null"
 			local reality="null"
 			;;
 		esac
-		#fi
+
 		# incase multi-domain input
 		if [ "$(eval echo \$ssconf_basic_v2ray_network_host_$nu | grep ",")" ]; then
 			ssconf_basic_v2ray_network_host_$nu=$(eval echo \$ssconf_basic_v2ray_network_host_$nu | sed 's/,/", "/g')
@@ -190,7 +290,7 @@ rm -f /tmp/tmp_v2ray.json
 			fi
 			;;
 		kcp)
-		local local_path=$(eval echo \$ssconf_basic_v2ray_network_path_$nu)
+			local local_path=$(eval echo \$ssconf_basic_v2ray_network_path_$nu)
 			local kcp="{
 				\"mtu\": 1350,
 				\"tti\": 50,
@@ -199,18 +299,18 @@ rm -f /tmp/tmp_v2ray.json
 				\"congestion\": false,
 				\"readBufferSize\": 2,
 				\"writeBufferSize\": 2,
-				\"seed\": "$local_path",
+				\"seed\": \"$local_path\",
 				\"header\": {
 				\"type\": \"$(eval echo \$ssconf_basic_v2ray_headtype_kcp_$nu)\",
 				\"request\": null,
 				\"response\": null
 				}
 				}"
-			[ -z "$local_path" ] && local kcp=$(echo $kcp |sed 's/"seed": "*, //')	
+			[ -z "$local_path" ] && local kcp=$(echo $kcp | sed 's/"seed": "*, //')
 			;;
 		ws)
-		local local_path=$(eval echo \$ssconf_basic_v2ray_network_path_$nu)
-		local local_header=$(eval echo \$ssconf_basic_v2ray_network_host_$nu)
+			local local_path=$(eval echo \$ssconf_basic_v2ray_network_path_$nu)
+			local local_header=$(eval echo \$ssconf_basic_v2ray_network_host_$nu)
 			local ws="{
 				\"connectionReuse\": true,
 				\"fingerprint\": $(get_fingerprint $local_fingerprint),
@@ -219,8 +319,8 @@ rm -f /tmp/tmp_v2ray.json
 				}"
 			;;
 		h2)
-		local local_path=$(eval echo \$ssconf_basic_v2ray_network_path_$nu)
-		local local_header=$(eval echo \$ssconf_basic_v2ray_network_host_$nu)
+			local local_path=$(eval echo \$ssconf_basic_v2ray_network_path_$nu)
+			local local_header=$(eval echo \$ssconf_basic_v2ray_network_host_$nu)
 			local h2="{
 				\"fingerprint\": $(get_fingerprint $local_fingerprint),
 				\"path\": $(get_path $local_path),
@@ -228,15 +328,16 @@ rm -f /tmp/tmp_v2ray.json
 				}"
 			;;
 		grpc)
-		local local_serviceName=$(eval echo \$ssconf_basic_v2ray_serviceName_$nu)
+			local local_serviceName=$(eval echo \$ssconf_basic_v2ray_serviceName_$nu)
 			local grpc="{
 				\"multiMode\": true,
   				\"idle_timeout\": 13,
 				\"fingerprint\": $(get_fingerprint $local_fingerprint),
-				\"serviceName\": $(get_path $local_serviceName) 
+				\"serviceName\": $(get_path $local_serviceName)
 				}"
-			;;	
+			;;
 		esac
+
 		# log area
 		cat >"/tmp/tmp_v2ray.json" <<-EOF
 			{
@@ -246,8 +347,9 @@ rm -f /tmp/tmp_v2ray.json
 				"loglevel": "error"
 			},
 		EOF
-			# inbounds area (23458 for socks5)
-			cat >>"/tmp/tmp_v2ray.json" <<-EOF
+
+		# inbounds area (23458 for socks5)
+		cat >>"/tmp/tmp_v2ray.json" <<-EOF
 				"inbounds": [
 					{
 						"port": 23458,
@@ -262,7 +364,8 @@ rm -f /tmp/tmp_v2ray.json
 						"streamSettings": null
 					}
 				],
-			EOF
+		EOF
+
 		# outbounds area
 		if [ "$array13" == "vmess" ]; then
 			cat >>"/tmp/tmp_v2ray.json" <<-EOF
@@ -305,8 +408,7 @@ rm -f /tmp/tmp_v2ray.json
 				}
 			EOF
 		elif [ "$array13" == "vless" ]; then
-		  #vless
-		  cat >>"/tmp/tmp_v2ray.json" <<-EOF
+			cat >>"/tmp/tmp_v2ray.json" <<-EOF
 				"outbounds": [
 				  {
 					"tag": "agentout",
@@ -332,7 +434,6 @@ rm -f /tmp/tmp_v2ray.json
 					  "network": "$(eval echo \$ssconf_basic_v2ray_network_$nu)",
 					  "security": "$(eval echo \$ssconf_basic_v2ray_network_security_$nu)",
 					  "tlsSettings": $tls,
-					  "xtlsSettings": $xtls,
 					  "realitySettings": $reality,
 					  "tcpSettings": $tcp,
 					  "kcpSettings": $kcp,
@@ -349,7 +450,6 @@ rm -f /tmp/tmp_v2ray.json
 				}
 			EOF
 		fi
-		
 }
 
 create_trojan_json(){

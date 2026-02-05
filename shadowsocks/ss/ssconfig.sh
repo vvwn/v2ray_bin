@@ -1409,7 +1409,6 @@ create_v2ray_json(){
 		local h2="null"
 		local grpc="null"
 		local tls="null"
-		local xtls="null"
 		local reality="null"
 		local vless_flow=""
 		[ "$ss_basic_fingerprint" == "none" ] && local ss_basic_fingerprint=""
@@ -1436,13 +1435,6 @@ create_v2ray_json(){
 					}"
 			[ "$ss_basic_v2ray_network_flow" != "none" -a "$ss_basic_v2ray_network_flow" != "" ] && local vless_flow="\"flow\": \"$ss_basic_v2ray_network_flow\","	|| 	local vless_flow=""
 			;;
-		xtls)
-			local xtls="{
-					\"allowInsecure\": $(get_function_switch $ss_basic_allowinsecure),
-					\"serverName\": \"$ss_basic_v2ray_network_tlshost\"
-					}"
-			local vless_flow="\"flow\": \"$ss_basic_v2ray_network_flow\","
-			;;
 		reality)
 			local reality="{
 					\"serverName\": \"$ss_basic_v2ray_network_tlshost\",
@@ -1455,7 +1447,6 @@ create_v2ray_json(){
 			;;	
 		*)
 			local tls="null"
-			local xtls="null"
 			local reality="null"
 			;;
 		esac
@@ -1555,6 +1546,7 @@ create_v2ray_json(){
 			cat >>"$V2RAY_CONFIG_FILE_TMP" <<-EOF
 				"inbounds": [
 					{
+					"tag": "in-dns",
 					"protocol": "dokodemo-door",
 					"port": $DNSF_PORT,
 					"settings": {
@@ -1566,6 +1558,7 @@ create_v2ray_json(){
 						}
 					},
 					{
+						"tag": "in-redir",
 						"listen": "0.0.0.0",
 						"port": 3333,
 						"protocol": "dokodemo-door",
@@ -1581,6 +1574,7 @@ create_v2ray_json(){
 			cat >>"$V2RAY_CONFIG_FILE_TMP" <<-EOF
 				"inbounds": [
 					{
+						"tag": "in-socks",
 						"port": 23456,
 						"listen": "0.0.0.0",
 						"protocol": "socks",
@@ -1593,6 +1587,7 @@ create_v2ray_json(){
 						"streamSettings": null
 					},
 					{
+						"tag": "in-redir",
 						"listen": "0.0.0.0",
 						"port": 3333,
 						"protocol": "dokodemo-door",
@@ -1673,7 +1668,6 @@ create_v2ray_json(){
 					  "network": "$ss_basic_v2ray_network",
 					  "security": "$ss_basic_v2ray_network_security",
 					  "tlsSettings": $tls,
-					  "xtlsSettings": $xtls,
 					  "realitySettings": $reality,
 					  "tcpSettings": $tcp,
 					  "kcpSettings": $kcp,
@@ -1718,6 +1712,7 @@ create_v2ray_json(){
 								},
 								\"inbounds\": [
 									{
+										\"tag\": \"in-dns\",
 										\"protocol\": \"dokodemo-door\", 
 										\"port\": $DNSF_PORT,
 										\"settings\": {
@@ -1729,6 +1724,7 @@ create_v2ray_json(){
 										}
 									},
 									{
+										\"tag\": \"in-redir\",
 										\"listen\": \"0.0.0.0\",
 										\"port\": 3333,
 										\"protocol\": \"dokodemo-door\",
@@ -1748,6 +1744,7 @@ create_v2ray_json(){
 								},
 								\"inbounds\": [
 									{
+										\"tag\": \"in-socks\",
 										\"port\": 23456,
 										\"listen\": \"0.0.0.0\",
 										\"protocol\": \"socks\",
@@ -1760,6 +1757,7 @@ create_v2ray_json(){
 										\"streamSettings\": null
 									},
 									{
+										\"tag\": \"in-redir\",
 										\"listen\": \"0.0.0.0\",
 										\"port\": 3333,
 										\"protocol\": \"dokodemo-door\",
@@ -1772,8 +1770,86 @@ create_v2ray_json(){
 							}"
 		fi
 		echo_date 解析V2Ray配置文件...
-		echo $TEMPLATE | jq --argjson args "$OUTBOUNDS" '. + {outbounds: [$args]}' >"$V2RAY_CONFIG_FILE"
-		echo_date V2Ray配置文件写入成功到"$V2RAY_CONFIG_FILE"
+
+		# 1) 统一 OUTBOUNDS 为数组
+		OUTBOUNDS_ARR=$(cat "$V2RAY_CONFIG_FILE_TMP" | jq -c '
+		if (.outbounds? // null) != null then
+			.outbounds
+		elif (.outbound? // null) != null then
+			[ .outbound ]
+		else
+			[]
+		end
+		')
+
+		# 2) 判断是否是 xagg 聚合输入（只要存在 xagg_ 前缀）
+		IS_XAGG=$(echo "$OUTBOUNDS_ARR" | jq -r '
+		any(.[]; ((.tag // "") | startswith("xagg_")))
+		')
+
+		# ===== 新增 A：读取聚合策略（默认 leastPing） =====
+		XAGG_STRATEGY=$(echo "$OUTBOUNDS_ARR" | jq -r '
+		.[] | select(.tag=="xagg_meta") | .settings.strategy // empty
+		')
+
+		[ -z "$XAGG_STRATEGY" ] && XAGG_STRATEGY="leastPing"
+		# =====================================================
+
+		if [ "$IS_XAGG" = "true" ]; then
+			echo_date "检测到 xagg 聚合节点，策略: $XAGG_STRATEGY"
+
+			# ===== 新增 B：剔除 xagg_meta =====
+			REAL_OUTBOUNDS=$(echo "$OUTBOUNDS_ARR" | jq -c '
+			map(select(.tag != "xagg_meta"))
+			')
+			# ==================================
+
+			# 3) 提取真实节点 tag（只剩 xagg_1 / xagg_2 ...）
+			TAGS=$(echo "$REAL_OUTBOUNDS" | jq -c '[ .[] | .tag ]')
+
+			# 4) 生成 routing + observatory
+			ROBS=$(jq -nc --argjson tags "$TAGS" --arg strategy "$XAGG_STRATEGY" '
+			{
+				"routing": {
+					"domainStrategy": "AsIs",
+					"balancers": [
+						{
+							"tag": "balancer-main",
+							"selector": $tags,
+							"strategy": { "type": $strategy }
+						}
+					],
+					"rules": [
+						{
+							"type": "field",
+							"inboundTag": ["in-socks","in-redir"],
+							"balancerTag": "balancer-main"
+						}
+					]
+				},
+				"observatory": {
+					"subjectSelector": $tags,
+					"probeURL": "https://www.gstatic.com/generate_204",
+					"probeInterval": "30s"
+				}
+			}
+			')
+
+	# 5) 合并（注意：用 REAL_OUTBOUNDS）
+	echo "$TEMPLATE" | jq \
+		--argjson outbounds "$REAL_OUTBOUNDS" \
+		--argjson robs "$ROBS" \
+		'. + {outbounds: $outbounds} + $robs' >"$V2RAY_CONFIG_FILE"
+
+	else
+		# 普通自定义 JSON，未启用聚合逻辑
+		echo "$TEMPLATE" | jq \
+			--argjson outbounds "$OUTBOUNDS_ARR" \
+			'. + {outbounds: $outbounds}' >"$V2RAY_CONFIG_FILE"
+	fi
+
+	echo_date "V2Ray/Xray 配置文件写入成功: $V2RAY_CONFIG_FILE"
+
 
 		# 检测用户json的服务器ip地址
 		resolve_node_ip4json

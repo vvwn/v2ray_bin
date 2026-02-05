@@ -100,8 +100,8 @@ function browser_compatibility1(){
 
 function menu_hook() {
 	browser_compatibility1();
-	tabtitle[tabtitle.length - 1] = new Array("", "科学上网设置", "负载均衡设置", "Socks5设置", "__INHERIT__");
-	tablink[tablink.length - 1] = new Array("", "Main_Ss_Content.asp", "Main_Ss_LoadBlance.asp", "Main_SsLocal_Content.asp");
+	tabtitle[tabtitle.length - 1] = new Array("", "科学上网设置", "负载均衡设置", "Xray本地聚合", "Socks5设置", "__INHERIT__");
+	tablink[tablink.length - 1] = new Array("", "Main_Ss_Content.asp", "Main_Ss_LoadBlance.asp", "Main_SsXray_Aggregate.asp", "Main_SsLocal_Content.asp");
 }
 
 function done_validating(action) {
@@ -809,6 +809,10 @@ function openssHint(itemNum) {
 		width = "450px";
 		statusmenu = "</br>选择对应的协议"
 		_caption = "协议protocol（vmess/vless/trojan）";
+	}else if (itemNum == 211) {
+		width = "550px";
+		statusmenu = "</br>leastPing：自动选择延迟最低的节点（推荐，最稳定）</br>roundRobin：节点轮流使用，适合多节点均衡</br>random：随机选择节点，不保证稳定性"
+		_caption = "Xray 聚合策略";		
 		return overlib(statusmenu, OFFSETX, -560, OFFSETY, -90, LEFT, STICKY, WIDTH, 'width', CAPTION, _caption, CLOSETITLE, '');
 	}
 	return overlib(statusmenu, OFFSETX, -160, LEFT, STICKY, WIDTH, 'width', CAPTION, _caption, CLOSETITLE, '');
